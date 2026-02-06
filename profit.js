@@ -194,12 +194,27 @@ class Profit {
         this.backupControls.style.background = '#fff';
         this.backupControls.innerHTML = '<h3 style="margin-top:0">Backup & Restore</h3>';
 
-        const dlBtn = document.createElement('button');
-        dlBtn.textContent = 'Download Backup';
-        dlBtn.style.padding = '8px 15px';
-        dlBtn.style.marginRight = '15px';
-        dlBtn.onclick = () => this.downloadBackup();
-        this.backupControls.appendChild(dlBtn);
+        const dlLink = document.createElement('a');
+        dlLink.textContent = 'Download Backup';
+        dlLink.style.display = 'inline-block';
+        dlLink.style.padding = '8px 15px';
+        dlLink.style.marginRight = '15px';
+        dlLink.style.background = '#f8f9fa';
+        dlLink.style.border = '1px solid #ddd';
+        dlLink.style.borderRadius = '4px';
+        dlLink.style.color = '#333';
+        dlLink.style.textDecoration = 'none';
+        dlLink.style.fontSize = '13px';
+        dlLink.style.cursor = 'pointer';
+
+        dlLink.onclick = (e) => {
+            const data = this.config.getBackupData();
+            const date = new Date().toISOString().split('T')[0];
+            const hash = Math.random().toString(16).substring(2, 8);
+            dlLink.href = 'data:text/plain;charset=utf-8,' + encodeURIComponent(data);
+            dlLink.download = `profit-${date}-${hash}.txt`;
+        };
+        this.backupControls.appendChild(dlLink);
 
         const restoreLabel = document.createElement('label');
         restoreLabel.textContent = 'Restore from file: ';
@@ -350,19 +365,6 @@ class Profit {
 
         this.output = document.createElement('div');
         container.appendChild(this.output);
-    }
-
-    downloadBackup() {
-        const data = this.config.getBackupData();
-        const dataUrl = 'data:text/plain;charset=utf-8,' + encodeURIComponent(data);
-        const date = new Date().toISOString().split('T')[0];
-        const hash = Math.random().toString(16).substring(2, 8);
-        const a = document.createElement('a');
-        a.href = dataUrl;
-        a.download = `profit-${date}-${hash}.txt`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
     }
 
     handleRestore(e) {
