@@ -124,6 +124,14 @@ class ConfigManager {
         return val ? JSON.parse(val) : null;
     }
 
+    getLastInventoryUpdateDate() {
+        return this.storage.getItem('$last_inventory_update');
+    }
+
+    setLastInventoryUpdateDate(date) {
+        this.storage.setItem('$last_inventory_update', date);
+    }
+
     getAvailableDates() {
         const dates = [];
         for (let i = 0; i < this.storage.length; i++) {
@@ -605,7 +613,10 @@ class Profit {
             }
         }
 
-        alert(`Updated stock levels for ${count} products.`);
+        const today = new Date().toISOString().split('T')[0];
+        this.config.setLastInventoryUpdateDate(today);
+
+        alert(`Updated stock levels for ${count} products. Last update: ${today}`);
     }
 
     generateInventoryFromDB(startStr, endStr) {
@@ -645,6 +656,35 @@ class Profit {
             current.setDate(current.getDate() + 1);
         }
 
+        const lastUpdateDate = this.config.getLastInventoryUpdateDate();
+
+        // Calculate sales since last inventory update for EACH product
+        const salesSinceUpdate = {}; // name -> count
+        if (lastUpdateDate) {
+            let scanDate = new Date(lastUpdateDate);
+            const today = new Date();
+            while (scanDate <= today) {
+                const dateStr = scanDate.toISOString().split('T')[0];
+                const data = this.config.getDailyData(dateStr);
+                if (data && data.ordersList) {
+                    data.ordersList.forEach(order => {
+                        if (order.products_summary) {
+                            const items = order.products_summary.split(', ');
+                            items.forEach(item => {
+                                const parts = item.split('× ');
+                                if (parts.length === 2) {
+                                    const qty = parseInt(parts[0]);
+                                    const name = parts[1].trim();
+                                    salesSinceUpdate[name] = (salesSinceUpdate[name] || 0) + qty;
+                                }
+                            });
+                        }
+                    });
+                }
+                scanDate.setDate(scanDate.getDate() + 1);
+            }
+        }
+
         const inventoryData = [];
         Object.keys(productSales).forEach(name => {
             const cost = this.config.getProductCost(name);
@@ -654,15 +694,19 @@ class Profit {
             const sold = productSales[name];
             const velocity = sold / diffDays;
 
-            // Calculate days left, but handle null stock separately
+            const soldSince = salesSinceUpdate[name] || 0;
+            const expectedStock = stock !== null ? stock - soldSince : null;
+
+            // Calculate days left using expected stock
             let daysLeft = Infinity;
-            if (stock !== null) {
-                daysLeft = velocity > 0 ? stock / velocity : Infinity;
+            if (expectedStock !== null) {
+                daysLeft = velocity > 0 ? expectedStock / velocity : Infinity;
             }
 
             inventoryData.push({
                 title: name,
                 stock: stock,
+                expectedStock: expectedStock,
                 sold: sold,
                 cost: parseFloat(cost),
                 importance: sold * parseFloat(cost),
@@ -677,6 +721,15 @@ class Profit {
     }
 
     renderInventoryForecast(products) {
+        const lastUpdate = this.config.getLastInventoryUpdateDate() || 'Unknown';
+        const header = document.createElement('div');
+        header.style.marginBottom = '15px';
+        header.style.padding = '10px';
+        header.style.background = '#e2f3f5';
+        header.style.borderRadius = '4px';
+        header.style.borderLeft = '5px solid #17a2b8';
+        header.innerHTML = `<strong>Last Inventory Update:</strong> ${lastUpdate} <span style="font-size: 0.8em; color: #666; margin-left: 10px;">(Expected stock is calculated based on sales since this date)</span>`;
+
         const table = document.createElement('table');
         table.style.width = '100%';
         table.style.borderCollapse = 'collapse';
@@ -686,10 +739,11 @@ class Profit {
             <thead>
                 <tr style="background-color: #17a2b8; color: #ffffff; text-align: left;">
                     <th style="padding: 12px 15px;">Product Title</th>
-                    <th style="padding: 12px 15px;">Stock</th>
-                    <th style="padding: 12px 15px;">Sold (Selected)</th>
+                    <th style="padding: 12px 15px;">Last Stock</th>
+                    <th style="padding: 12px 15px;">Expected Stock</th>
+                    <th style="padding: 12px 15px;">Sold (Selected Range)</th>
                     <th style="padding: 12px 15px;">Importance (Sold*Cost)</th>
-                    <th style="padding: 12px 15px;">Days Left</th>
+                    <th style="padding: 12px 15px;">Forecasted Days</th>
                 </tr>
             </thead>
             <tbody></tbody>
@@ -701,16 +755,17 @@ class Profit {
             tr.style.borderBottom = '1px solid #ddd';
 
             let stockHtml = p.stock === null ? '?' : p.stock;
+            let expectedHtml = p.expectedStock === null ? '?' : Math.floor(p.expectedStock);
             let daysHtml = p.daysLeft === Infinity ? '∞' : Math.ceil(p.daysLeft);
-            if (p.stock === null) daysHtml = '?';
+            if (p.expectedStock === null) daysHtml = '?';
 
             let bgColor = '';
             let textColor = '';
 
-            if (p.stock === null) {
+            if (p.expectedStock === null) {
                 bgColor = '#f2f2f2'; // Gray
                 textColor = '#888';
-            } else if (p.daysLeft < 30) {
+            } else if (p.daysLeft < 30 || p.expectedStock <= 0) {
                 bgColor = '#ffcccc';
                 textColor = '#900';
             } else if (p.daysLeft < 60) {
@@ -726,6 +781,7 @@ class Profit {
             tr.innerHTML = `
                 <td style="padding: 12px 15px;">${p.title}</td>
                 <td style="padding: 12px 15px;">${stockHtml}</td>
+                <td style="padding: 12px 15px; font-weight: bold;">${expectedHtml}</td>
                 <td style="padding: 12px 15px;">${p.sold}</td>
                 <td style="padding: 12px 15px;">${p.importance.toFixed(2)}</td>
                 <td style="padding: 12px 15px; font-weight: bold;">${daysHtml}</td>
@@ -734,6 +790,7 @@ class Profit {
         });
 
         this.output.innerHTML = '';
+        this.output.appendChild(header);
         this.output.appendChild(table);
     }
 
