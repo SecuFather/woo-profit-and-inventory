@@ -8,6 +8,11 @@ class ConfigManager {
         return val === null ? defaultValue : parseFloat(val);
     }
 
+    getString(key, defaultValue = '') {
+        const val = this.storage.getItem(key);
+        return val === null ? defaultValue : val;
+    }
+
     set(key, value) {
         this.storage.setItem(key, value);
     }
@@ -72,7 +77,8 @@ class ConfigManager {
             fixed_cost_per_day: this.get('$fixed_cost_per_day', 0),
             payment_fee_percent: this.get('$payment_fee_percent', 0),
             revenue_tax_percent: this.get('$revenue_tax_percent', 0),
-            allegro_fee_percent: this.get('$allegro_fee_percent', 0)
+            allegro_fee_percent: this.get('$allegro_fee_percent', 0),
+            bank_ignore_phrases: this.getString('$bank_ignore_phrases', '')
         };
     }
 
@@ -143,6 +149,14 @@ class ConfigManager {
         return dates.sort();
     }
 
+    getBankCutoffDate() {
+        return this.storage.getItem('$bank_cutoff_date');
+    }
+
+    setBankCutoffDate(date) {
+        this.storage.setItem('$bank_cutoff_date', date);
+    }
+
     getBackupData() {
         const data = {};
         for (let i = 0; i < this.storage.length; i++) {
@@ -178,6 +192,7 @@ class Profit {
         this.data = [];
         this.lastCSVText = null;
         this.lastInventoryText = null;
+        this.lastBankCSVText = null;
         this.initUI();
     }
 
@@ -248,7 +263,7 @@ class Profit {
         this.renderConfigInputs(controls);
 
         const uploadLabel = document.createElement('div');
-        uploadLabel.textContent = 'Upload WooCommerce Orders CSV:';
+        uploadLabel.textContent = 'Upload CSV (Orders, Inventory, Bank):';
         uploadLabel.style.marginTop = '15px';
         uploadLabel.style.marginBottom = '5px';
         uploadLabel.style.fontWeight = 'bold';
@@ -259,24 +274,9 @@ class Profit {
         this.upload.accept = '.csv';
         controls.appendChild(this.upload);
 
-        this.output = document.createElement('div');
-        container.appendChild(this.output);
-
         this.upload.addEventListener('change', (e) => this.handleFileUpload(e));
 
-        const invLabel = document.createElement('div');
-        invLabel.textContent = 'Import Stock Levels (WooCommerce Product Report):';
-        invLabel.style.marginTop = '15px';
-        invLabel.style.marginBottom = '5px';
-        invLabel.style.fontWeight = 'bold';
-        controls.appendChild(invLabel);
-
-        this.invUpload = document.createElement('input');
-        this.invUpload.type = 'file';
-        this.invUpload.accept = '.csv';
-        controls.appendChild(this.invUpload);
-
-        this.invUpload.addEventListener('change', (e) => this.handleInventoryUpload(e));
+        // Inventory upload removed - consolidated above
 
         // Report Control Section
         const reportControls = document.createElement('div');
@@ -368,6 +368,25 @@ class Profit {
         btnWrapper.appendChild(toggleBtn);
         btnWrapper.appendChild(genBtn);
         btnWrapper.appendChild(genInvBtn);
+
+        const showBankBtn = document.createElement('button');
+        showBankBtn.textContent = 'Show Bank Operations';
+        showBankBtn.style.padding = '8px 15px';
+        showBankBtn.style.background = '#28a745'; // Green
+        showBankBtn.style.color = 'white';
+        showBankBtn.style.border = 'none';
+        showBankBtn.style.borderRadius = '4px';
+        showBankBtn.style.cursor = 'pointer';
+
+        showBankBtn.onclick = () => {
+            if (this.lastBankCSVText) {
+                this.processBankCSV(this.lastBankCSVText);
+            } else {
+                alert('Please upload a Bank CSV first.');
+            }
+        };
+        btnWrapper.appendChild(showBankBtn);
+
         reportControls.appendChild(btnWrapper);
         container.appendChild(reportControls);
 
@@ -419,8 +438,13 @@ class Profit {
             label.style.fontSize = '0.9em';
 
             const input = document.createElement('input');
-            input.type = 'number';
-            input.step = '0.01';
+            if (key === 'bank_ignore_phrases') {
+                input.type = 'text';
+                input.placeholder = 'Comma separated phrases to ignore in Description';
+            } else {
+                input.type = 'number';
+                input.step = '0.01';
+            }
             input.value = globals[key];
             input.style.width = '100%';
             input.style.padding = '5px';
@@ -450,6 +474,22 @@ class Profit {
         // We will use the existing parsing code but instead of "generateReport(dailyStats)",
         // we will "save to DB" and then "alert success".
 
+        // Detect Bank CSV
+        if (text.includes('#Data operacji;#Opis operacji;#Rachunek;#Kategoria;#Kwota;')) {
+            this.processBankCSV(text);
+            return;
+        }
+
+        // Detect Inventory CSV
+        // Primary anchor: "Stan magazynowy"
+        // Also check for a product title column
+        if (text.includes('Stan magazynowy') &&
+            (text.includes('Tytuł produktu') || text.includes('Produkt') || text.includes('Nazwa'))) {
+            this.processInventoryCSV(text);
+            return;
+        }
+
+        // Default: Assume Orders CSV
         this.lastCSVText = text;
         const lines = text.split('\n');
         const headers = lines[0].split(',').map(h => h.replace(/"/g, '').trim());
@@ -565,6 +605,184 @@ class Profit {
         } else {
             alert('No valid data found.');
         }
+    }
+
+    processBankCSV(text) {
+        this.lastBankCSVText = text;
+        const lines = text.split('\n');
+
+        // Find header row based on common fields
+        const headerRowIndex = lines.findIndex(l => l.includes('#Kwota') && l.includes('#Data operacji'));
+
+        if (headerRowIndex === -1) {
+            alert('Bank CSV header not found.');
+            return;
+        }
+
+        // Helper to strip quotes
+        const clean = (s) => s ? s.trim().replace(/^['"]+|['"]+$/g, '') : '';
+
+        // Robust Semicolon Splitter handles quoted semicolons
+        const parseSemicolonLine = (line) => {
+            // Regex to match quoted or unquoted fields followed by delimiter or end of string
+            const re_value = /(?!\s*$)\s*(?:'([^'\\]*(?:\\[\S\s][^'\\]*)*)'|"([^"\\]*(?:\\[\S\s][^"\\]*)*)"|([^;'"\s\\]*(?:\s+[^;'"\s\\]+)*))\s*(?:;|$)/g;
+
+            // If empty or just whitespace
+            if (!line || !line.trim()) return null;
+
+            const a = [];
+            line.replace(re_value, function (m0, m1, m2, m3) {
+                if (m1 !== undefined) a.push(m1.replace(/\\'/g, "'"));
+                else if (m2 !== undefined) a.push(m2.replace(/\\"/g, '"'));
+                else if (m3 !== undefined) a.push(m3);
+                return '';
+            });
+            // Handle trailing empty field if line ends with semicolon
+            if (/;\s*$/.test(line)) a.push('');
+            return a;
+        };
+
+        // Use robust parser for headers too
+        const headersRaw = parseSemicolonLine(lines[headerRowIndex]) || lines[headerRowIndex].split(';');
+        const headers = headersRaw.map(h => clean(h));
+        const expectedColCount = headers.length;
+
+        const dataIdx = headers.indexOf('#Data operacji');
+        const descIdx = headers.indexOf('#Opis operacji');
+        const amountIdx = headers.indexOf('#Kwota');
+
+        const ignoreList = this.config.getGlobals().bank_ignore_phrases.split(',').map(s => clean(s)).filter(s => s);
+        const cutoffDate = this.config.getBankCutoffDate();
+
+        const operations = [];
+
+        for (let i = headerRowIndex + 1; i < lines.length; i++) {
+            const line = lines[i].trim();
+            if (!line) continue;
+
+            // Optimization: Try simple split first
+            let row = line.split(';');
+
+            // If simple split results in MORE columns than expected, it likely means
+            // a semicolon was inside a quoted field -> use robust parser.
+            // (Note: If less, robust parser might help too if quotes are weird, but usually it's "more")
+            if (row.length > expectedColCount) {
+                const complexRow = parseSemicolonLine(line);
+                if (complexRow) row = complexRow;
+            }
+
+            if (row.length < 5) continue;
+
+            let dateStr = clean(row[dataIdx]);
+
+            if (/^\d{2}[.-]\d{2}[.-]\d{4}$/.test(dateStr)) {
+                const parts = dateStr.split(/[.-]/);
+                dateStr = `${parts[2]}-${parts[1]}-${parts[0]}`;
+            }
+
+            if (cutoffDate && dateStr <= cutoffDate) continue;
+
+            const amountStr = clean(row[amountIdx]);
+            if (amountStr.includes('-')) continue;
+
+            const description = clean(row[descIdx]);
+
+            // Filter by Description
+            if (ignoreList.some(phrase => description.includes(phrase))) continue;
+
+            operations.push({
+                date: dateStr,
+                description: description,
+                amount: amountStr
+            });
+        }
+
+        this.renderBankReport(operations);
+    }
+
+    renderBankReport(operations) {
+        this.output.innerHTML = '';
+
+        const originalCount = operations.length;
+        const limitedOperations = operations.slice(0, 100);
+
+        const headerDiv = document.createElement('div');
+        headerDiv.style.display = 'flex';
+        headerDiv.style.justifyContent = 'space-between';
+        headerDiv.style.alignItems = 'center';
+
+        const h2 = document.createElement('h2');
+        if (originalCount > 100) {
+            h2.textContent = `Bank Operations (Showing 100 of ${originalCount})`;
+        } else {
+            h2.textContent = `Bank Operations (${originalCount})`;
+        }
+        headerDiv.appendChild(h2);
+
+        // Optional: clear cutoff button? User didn't ask for it, but might be useful.
+        // For now, stick to requirements.
+
+        this.output.appendChild(headerDiv);
+
+        if (limitedOperations.length === 0) {
+            const p = document.createElement('p');
+            p.textContent = 'No new operations found.';
+            this.output.appendChild(p);
+            return;
+        }
+
+        const table = document.createElement('table');
+        table.style.width = '100%';
+        table.style.borderCollapse = 'collapse';
+        table.style.boxShadow = '0 0 20px rgba(0,0,0,0.1)';
+
+        table.innerHTML = `
+            <thead>
+                <tr style="background: #007bff; color: white; border-bottom: 2px solid #ddd;">
+                    <th style="padding: 10px; text-align: left;">Date</th>
+                    <th style="padding: 10px; text-align: left;">Description</th>
+                    <th style="padding: 10px; text-align: right;">Amount</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        `;
+
+        const tbody = table.querySelector('tbody');
+        limitedOperations.forEach(op => {
+            const tr = document.createElement('tr');
+            tr.style.borderBottom = '1px solid #eee';
+
+            const dateTd = document.createElement('td');
+            dateTd.style.padding = '8px';
+            dateTd.textContent = op.date;
+            dateTd.style.cursor = 'pointer';
+            dateTd.title = 'Click to mark this date (and older) as processed';
+            dateTd.style.textDecoration = 'underline';
+            dateTd.style.color = '#0056b3';
+
+            dateTd.onclick = () => {
+                if (confirm(`Mark operations up to ${op.date} as processed? They will be hidden in the future.`)) {
+                    this.config.setBankCutoffDate(op.date);
+                    this.processBankCSV(this.lastBankCSVText);
+                }
+            };
+
+            const descTd = document.createElement('td');
+            descTd.style.padding = '8px';
+            descTd.textContent = op.description;
+
+            const amountTd = document.createElement('td');
+            amountTd.style.padding = '8px';
+            amountTd.style.textAlign = 'right';
+            amountTd.textContent = op.amount;
+
+            tr.appendChild(dateTd);
+            tr.appendChild(descTd);
+            tr.appendChild(amountTd);
+            tbody.appendChild(tr);
+        });
+
+        this.output.appendChild(table);
     }
 
     handleInventoryUpload(e) {
