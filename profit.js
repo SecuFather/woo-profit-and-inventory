@@ -529,6 +529,9 @@ class Profit {
             // ... (Value parsing - reused)
             const salesStr = row[salesIdx].replace(/\u00a0zł/g, '').replace(/,/g, '.').trim();
             const sales = parseFloat(salesStr) || 0;
+
+            // Skip orders with negative sales (e.g. refunds/returns)
+            if (sales < 0) continue;
             const incomeStr = row[incomeIdx].replace(/\u00a0zł/g, '').replace(/,/g, '.').trim();
             const income = parseFloat(incomeStr) || 0;
             const orderId = row[idIdx];
